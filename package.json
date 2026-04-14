@@ -17,7 +17,7 @@
   "scripts": {
     "build": "tsc && node -e \"require('fs').cpSync('src/signatures','dist/signatures',{recursive:true})\"",
     "watch": "tsc -w",
-    "test": "node dist/test_runner.js",
+    "test": "node dist/test_runner.js && node test-extra.js",
     "scan": "node dist/self-scan.js",
     "scan:json": "node dist/self-scan.js --json",
     "prescan": "npm run build"
