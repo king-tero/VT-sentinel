@@ -1,7 +1,6 @@
-import axios from 'axios';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
-import FormData from 'form-data';
+import * as path from 'path';
 
 // Re-export credential persistence helpers for backward compat with callers
 // that imported them from './vt-api'. The implementations live in
@@ -75,11 +74,19 @@ export async function registerAgent(opts?: RegisterAgentOpts): Promise<AgentCred
     if (opts?.defineYourSelf) body.define_your_self = opts.defineYourSelf;
     if (opts?.contactEmail) body.contact_email = opts.contactEmail;
 
-    const resp = await axios.post(`${VTAI_API_URL}/agents/register`, body, { timeout: HTTP_TIMEOUT_MS });
+    const resp = await fetch(`${VTAI_API_URL}/agents/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(HTTP_TIMEOUT_MS)
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json() as any;
+    
     return {
-        agentId: resp.data.agent_id,
-        agentToken: resp.data.agent_token,
-        publicHandle: resp.data.public_handle,
+        agentId: data.agent_id,
+        agentToken: data.agent_token,
+        publicHandle: data.public_handle,
         registeredAt: new Date().toISOString(),
     };
 }
@@ -124,18 +131,19 @@ export class VTApiClient {
         }
 
         try {
-            const resp = await axios.get(`${this.baseUrl}/files/${hash}`, {
+            const resp = await fetch(`${this.baseUrl}/files/${hash}`, {
                 headers: this.headers(),
-                timeout: HTTP_TIMEOUT_MS,
+                signal: AbortSignal.timeout(HTTP_TIMEOUT_MS)
             });
+            if (resp.status === 404) return null;
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            
+            const data = await resp.json();
 
             return this.vtai
-                ? this.parseVtaiReport(resp.data)
-                : this.parseStandardReport(resp.data);
+                ? this.parseVtaiReport(data)
+                : this.parseStandardReport(data);
         } catch (err: any) {
-            if (axios.isAxiosError(err) && err.response?.status === 404) {
-                return null;
-            }
             throw err;
         }
     }
@@ -211,33 +219,36 @@ export class VTApiClient {
         let uploadUrl = `${this.baseUrl}/files/`;
 
         if (sizeMb > 32) {
-            const urlResp = await axios.get(`${this.baseUrl}/files/upload_url`, {
+            const urlResp = await fetch(`${this.baseUrl}/files/upload_url`, {
                 headers: this.headers(),
-                timeout: HTTP_TIMEOUT_MS,
+                signal: AbortSignal.timeout(HTTP_TIMEOUT_MS)
             });
-            uploadUrl = urlResp.data.data;
+            if (!urlResp.ok) throw new Error(`HTTP ${urlResp.status}`);
+            const urlData = await urlResp.json() as any;
+            uploadUrl = urlData.data;
         }
 
         const form = new FormData();
-        form.append('file', fs.createReadStream(filePath));
+        const fileBuffer = fs.readFileSync(filePath);
+        const fileBlob = new Blob([fileBuffer]);
+        form.append('file', fileBlob, path.basename(filePath));
+        
         if (this.vtai) {
             form.append('agent_comments', 'Auto-scanned by VT Sentinel for OpenClaw');
         }
 
-        const resp = await axios.post(uploadUrl, form, {
-            headers: {
-                ...form.getHeaders(),
-                ...this.headers(),
-            },
-            maxContentLength: Infinity,
-            maxBodyLength: Infinity,
-            timeout: HTTP_TIMEOUT_MS * 4, // 120s for uploads (large files)
+        const resp = await fetch(uploadUrl, {
+            method: 'POST',
+            headers: this.headers(),
+            body: form,
+            signal: AbortSignal.timeout(HTTP_TIMEOUT_MS * 4)
         });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json() as any;
 
         return {
-            analysisId: resp.data.data.id,
-            message: `File uploaded. Analysis ID: ${resp.data.data.id}`,
+            analysisId: data.data.id,
+            message: `File uploaded. Analysis ID: ${data.data.id}`,
         };
     }
-
 }
