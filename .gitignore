@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Build output (regenerable via `npm run build`)
+dist/
+
+# Release artifacts
+*.tgz
+
+# Local logs and backups
+*.log
+*.bak
+
+# Secrets — MUST NEVER be committed
+.npmrc
+.npmrc.*
+.env
+.env.*
+
+# Test coverage
+coverage/
+.nyc_output/

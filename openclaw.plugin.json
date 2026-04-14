@@ -1,0 +1,132 @@
+{
+  "id": "openclaw-plugin-vt-sentinel",
+  "name": "VT Sentinel",
+  "description": "VirusTotal Sentinel for OpenClaw — malware detection, active protection, and AI-powered code analysis.",
+  "version": "0.12.3",
+  "skills": ["./skills"],
+  "contracts": {
+    "tools": [
+      "vt_scan_file",
+      "vt_check_hash",
+      "vt_upload_consent",
+      "vt_sentinel_status",
+      "vt_sentinel_configure",
+      "vt_sentinel_reset_policy",
+      "vt_sentinel_help",
+      "vt_sentinel_update",
+      "vt_sentinel_re_register"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "apiKey": {
+        "type": "string",
+        "description": "VirusTotal API Key (v3). Optional — without it, VT Sentinel auto-registers with VTAI for zero-config operation."
+      },
+      "watchDirs": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Directories to monitor for new files"
+      },
+      "autoScan": {
+        "type": "boolean",
+        "default": true,
+        "description": "Automatically scan new files in watched directories"
+      },
+      "maxFileSizeMb": {
+        "type": "number",
+        "default": 32,
+        "description": "Maximum file size to scan (MB)"
+      },
+      "sensitiveFilePolicy": {
+        "type": "string",
+        "enum": ["ask", "ask_once", "always_upload", "hash_only"],
+        "default": "ask",
+        "description": "Policy for sensitive files (PDF, Office, unknown archives): ask = prompt each time, ask_once = prompt once and remember, always_upload = auto-upload, hash_only = never upload"
+      },
+      "semanticFilePolicy": {
+        "type": "string",
+        "enum": ["ask", "ask_once", "always_upload", "hash_only"],
+        "default": "hash_only",
+        "description": "Policy for instruction files (SKILL.md, HOOK.md, TOOLS.md, AGENTS.md, etc.): ask = prompt each time, ask_once = prompt once, always_upload = auto-upload, hash_only = never upload (default, privacy-safe)"
+      },
+      "notifyLevel": {
+        "type": "string",
+        "enum": ["all", "threats_only", "silent"],
+        "default": "all",
+        "description": "Notification verbosity: all = log everything, threats_only = only malicious/suspicious, silent = no logs"
+      },
+      "excludeDirs": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Directories to exclude from watching"
+      },
+      "excludeGlobs": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Glob patterns for files to skip during scanning (e.g., *.log, *.tmp)"
+      },
+      "blockMode": {
+        "type": "string",
+        "enum": ["quarantine", "block_only", "log_only"],
+        "default": "quarantine",
+        "description": "How to handle malicious files: quarantine = rename + block exec, block_only = block exec only, log_only = just log"
+      },
+      "showCleanScanLogs": {
+        "type": "boolean",
+        "default": true,
+        "description": "Whether to log clean scan results"
+      },
+      "configPreset": {
+        "type": "string",
+        "enum": ["balanced", "privacy_first", "strict_security"],
+        "default": "balanced",
+        "description": "Configuration preset. Individual settings override the preset."
+      },
+      "agentDisplayName": {
+        "type": "string",
+        "description": "Display name for VTAI leaderboard (1-50 chars, [a-zA-Z0-9 _-]+)"
+      },
+      "agentHumanAlias": {
+        "type": "string",
+        "description": "Human alias for VTAI (1-50 chars, no spaces)"
+      },
+      "agentBio": {
+        "type": "string",
+        "description": "Agent description for VTAI define_your_self (1-200 chars)"
+      },
+      "agentContactEmail": {
+        "type": "string",
+        "description": "Contact email for VTAI (optional, privacy-sensitive)"
+      },
+      "agentMetadataMode": {
+        "type": "string",
+        "enum": ["minimal", "enhanced"],
+        "default": "minimal",
+        "description": "What metadata to send during registration. minimal = display_name only. enhanced = also sends OS family, preset, and auto-scan status (no personal data)."
+      }
+    },
+    "required": []
+  },
+  "uiHints": {
+    "apiKey": { "label": "VirusTotal API Key", "sensitive": true },
+    "watchDirs": { "label": "Watch Directories" },
+    "autoScan": { "label": "Auto-scan new files" },
+    "maxFileSizeMb": { "label": "Max File Size (MB)" },
+    "sensitiveFilePolicy": { "label": "Sensitive File Policy" },
+    "semanticFilePolicy": { "label": "Instruction File Policy" },
+    "notifyLevel": { "label": "Notification Level" },
+    "excludeDirs": { "label": "Exclude Directories" },
+    "excludeGlobs": { "label": "Exclude File Patterns" },
+    "blockMode": { "label": "Block Mode" },
+    "showCleanScanLogs": { "label": "Show Clean Scan Logs" },
+    "configPreset": { "label": "Configuration Preset" },
+    "agentDisplayName": { "label": "Agent Display Name" },
+    "agentHumanAlias": { "label": "Human Alias" },
+    "agentBio": { "label": "Agent Description" },
+    "agentContactEmail": { "label": "Contact Email", "sensitive": true },
+    "agentMetadataMode": { "label": "Metadata Mode" }
+  }
+}

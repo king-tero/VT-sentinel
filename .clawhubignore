@@ -1,0 +1,21 @@
+# Files excluded from the ClawHub code-plugin upload.
+# Mirrors the npm `files[]` filter — only ship runtime artifacts.
+
+# Source — users install the compiled dist/
+src/
+
+# Dev-only compiled artifacts (not listed in package.json files[])
+dist/test_runner.*
+dist/functional_test.*
+dist/self-scan.*
+
+# Dev scaffolding
+tsconfig.json
+package-lock.json
+
+# All hidden files/directories at any depth
+# (covers secrets, local tool state, ignore files, ephemeral fixtures, etc.)
+.*
+
+# Release tarballs
+*.tgz
