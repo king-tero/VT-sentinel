@@ -1,4 +1,3 @@
-import axios from 'axios';
 import * as chokidar from 'chokidar';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -136,14 +135,18 @@ export function isNewerVersion(latest: string, current: string): boolean {
  */
 async function fetchLatestVersion(): Promise<string | null> {
     try {
-        const resp = await axios.get(CLAWHUB_PACKAGE_URL, { timeout: 5000 });
-        const latest = resp.data?.package?.latestVersion;
+        const resp = await fetch(CLAWHUB_PACKAGE_URL, { signal: AbortSignal.timeout(5000) });
+        if (!resp.ok) throw new Error('fetch failed');
+        const data = await resp.json();
+        const latest = data?.package?.latestVersion;
         if (typeof latest === 'string' && latest.trim()) return latest.trim();
     } catch {}
 
     try {
-        const resp = await axios.get(NPM_REGISTRY_URL, { timeout: 5000 });
-        const latest = resp.data?.version;
+        const resp = await fetch(NPM_REGISTRY_URL, { signal: AbortSignal.timeout(5000) });
+        if (!resp.ok) throw new Error('fetch failed');
+        const data = await resp.json();
+        const latest = data?.version;
         if (typeof latest === 'string' && latest.trim()) return latest.trim();
     } catch {}
 
@@ -212,7 +215,7 @@ function vtSentinelPlugin(api: PluginApi) {
     // State directory: resolved once via the host runtime helper (which itself
     // honors OPENCLAW_STATE_DIR, legacy paths, and profile overrides). This
     // module never reads environment variables directly — doing so would
-    // co-occur with the axios calls elsewhere in this file and trip the
+    // co-occur with the fetch calls elsewhere in this file and trip the
     // install-security scanner's env-harvesting rule.
     const resolvedStateDir: string = (() => {
         const fromRuntime = (api as any).runtime?.state?.resolveStateDir;
