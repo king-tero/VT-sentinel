@@ -7,6 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import axios from 'axios';
 import { FileClassifier, FileCategory } from './classifier';
 import { Cache, RateLimiter } from './cache';
 import * as crypto from 'crypto';
@@ -16,7 +17,7 @@ import vtSentinelPluginDef, { isNewerVersion, isSelfPath, _generateUpdateCommand
 // Tests that exercise the register function keep calling it via `vtSentinelPlugin(mockApi)`.
 const vtSentinelPlugin = vtSentinelPluginDef.register;
 import type { SensitiveFilePolicy } from './scanner';
-import { VTApiClient, loadAgentCredentials, saveAgentCredentials, getAgentCredentialsPath, setStateDir } from './vt-api';
+import { VTApiClient, VTRateLimitError, loadAgentCredentials, saveAgentCredentials, getAgentCredentialsPath, setStateDir } from './vt-api';
 import type { AgentCredentials } from './vt-api';
 import { AuditLog } from './audit-log';
 import { ConfigManager, validateOverrides, matchGlob, FullConfig, ConfigOverrides, DANGEROUS_ROOTS, isDangerousRootPath } from './config-manager';
@@ -26,6 +27,9 @@ import { renderOnboarding, renderStatus, renderHelp, renderPolicyMatrix, renderC
 
 let passed = 0;
 let failed = 0;
+
+// Tests never send requests to VirusTotal, registration or update services.
+axios.defaults.adapter = async () => { throw new Error('Network disabled in tests'); };
 
 function assert(condition: boolean, name: string) {
     if (condition) {
@@ -2284,6 +2288,221 @@ function testVtaiResponseParsing() {
     assert(client3 instanceof VTApiClient, 'VTApiClient explicit VTAI mode works');
 }
 
+async function testApiCooldown() {
+    console.log('\n=== API retry deadlines ===\n');
+    const savedGet = axios.get, savedPost = axios.post, savedNow = Date.now;
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vt-cooldown-'));
+    const file = writeFile(tmp, 'fixture.sh', '#!/bin/sh\necho harmless-fixture\n');
+    const hash = 'a'.repeat(64);
+    const start = Date.parse('2026-10-02T12:00:00Z');
+    let now = start, gets = 0, posts = 0;
+    Date.now = () => now;
+    const report = { data: { id: hash, last_analysis_stats: { malicious: 0, suspicious: 0, harmless: 3, undetected: 70 } } };
+    const limited = (header?: unknown, body?: unknown) => ({
+        isAxiosError: true, config: { headers: { 'x-apikey': 'synthetic-secret' } },
+        response: { status: 429, headers: { 'retry-after': header }, data: body },
+        message: 'synthetic-private-upstream-message',
+    });
+    const fail = async (action: () => Promise<unknown>): Promise<unknown> => {
+        try { await action(); return undefined; } catch (error) { return error; }
+    };
+    const respond = (data: any = report) => {
+        (axios as any).get = async () => { gets++; return { data }; };
+    };
+    const reject = (error: any) => {
+        (axios as any).get = async () => { gets++; throw error; };
+    };
+    try {
+        const client = new VTApiClient('synthetic-key', true);
+        reject(limited('86400', { detail: { retry_after_seconds: 5 } }));
+        const first = await fail(() => client.checkHash(hash));
+        assert(first instanceof VTRateLimitError && first.status === 429 && first.retryAt === start + 86_400_000,
+            '429 preserves the full one-day Retry-After deadline');
+        assert(first instanceof Error && !first.message.includes('synthetic') && !('config' in first) && !('response' in first),
+            '429 error carries a safe deadline without Axios credentials or server text');
+        now += 301_000;
+        let blocked = 0;
+        for (let i = 0; i < 4540; i++) {
+            if (await fail(() => client.checkHash(hash)) instanceof VTRateLimitError) blocked++;
+        }
+        assert(blocked === 4540 && gets === 1, '4540 attempts during cooldown cause zero additional HTTP requests');
+        respond();
+        assert((await new VTApiClient('another-key', true).checkHash(hash))?.hash === hash,
+            'independent client instances do not inherit another client cooldown');
+        now = start + 86_400_000;
+        assert((await client.checkHash(hash))?.hash === hash, 'the exact deadline admits a new request without an automatic replay');
+
+        const cases: Array<[string, unknown, unknown, number]> = [
+            ['HTTP date', new Date(start + 7_200_000).toUTCString(), undefined, 7_200_000],
+            ['body fallback', undefined, { detail: { retry_after_seconds: 1800 } }, 1_800_000],
+            ['malformed header with body', 'invalid', { detail: { retry_after_seconds: 120 } }, 120_000],
+            ['absent metadata', undefined, undefined, 60_000],
+            ['negative header', '-1', undefined, 60_000],
+            ['fractional header', '0.5', undefined, 60_000],
+            ['overflow header', '99999999999999999999', undefined, 60_000],
+            ['boolean header', true, undefined, 60_000],
+            ['invalid body', undefined, { detail: { retry_after_seconds: -5 } }, 60_000],
+            ['zero delay', '0', undefined, 0],
+            ['past HTTP date', new Date(start - 1000).toUTCString(), undefined, 0],
+        ];
+        for (const [name, header, body, delay] of cases) {
+            now = start;
+            reject(limited(header, body));
+            const error = await fail(() => new VTApiClient('key', true).checkHash(hash));
+            assert(error instanceof VTRateLimitError && error.retryAt === start + delay, `${name} produces the expected safe retry deadline`);
+        }
+        const mixedCase = limited();
+        mixedCase.response.headers = { 'Retry-After': '1800' } as any;
+        reject(mixedCase);
+        const namedHeader = await fail(() => new VTApiClient('key', true).checkHash(hash));
+        assert(namedHeader instanceof VTRateLimitError && namedHeader.retryAt === start + 1_800_000,
+            'Retry-After header spelling is accepted as well as normalized Axios headers');
+
+        now = start;
+        const parallel = new VTApiClient('key', true);
+        const rejections: Array<(error: unknown) => void> = [];
+        (axios as any).get = () => new Promise((_resolve, reject) => rejections.push(reject));
+        const requests = Array.from({ length: 4 }, () => fail(() => parallel.checkHash(hash)));
+        rejections[0](limited('86400'));
+        await requests[0];
+        for (const [index, header] of ['60', '0', new Date(start - 1000).toUTCString()].entries()) {
+            rejections[index + 1](limited(header));
+            const shorter = await requests[index + 1];
+            assert(shorter instanceof VTRateLimitError && shorter.retryAt === start + 86_400_000,
+                'a concurrent shorter, zero or past 429 cannot shorten an existing cooldown');
+        }
+
+        for (const vtai of [true, false]) {
+            now = start;
+            const queryLimited = new VTApiClient('key', vtai);
+            reject(limited('3600'));
+            await fail(() => queryLimited.checkHash(hash));
+            posts = 0;
+            (axios as any).post = async () => { posts++; return { data: { data: { id: 'analysis-fixture' } } }; };
+            const uploadError = await fail(() => queryLimited.uploadFile(file));
+            assert(vtai ? uploadError === undefined && posts === 1 : uploadError instanceof VTRateLimitError && posts === 0,
+                vtai ? 'VTAI query cooldown leaves independent file contributions available' : 'standard VT query cooldown also blocks uploads');
+
+            const uploadLimited = new VTApiClient('key', vtai);
+            posts = 0;
+            (axios as any).post = async () => { posts++; throw limited('3600'); };
+            const upload429 = await fail(() => uploadLimited.uploadFile(file));
+            assert(upload429 instanceof VTRateLimitError && posts === 1, 'upload 429 is recorded without replaying POST');
+            const localUpload = await fail(() => uploadLimited.uploadFile(path.join(tmp, 'does-not-exist')));
+            assert(localUpload instanceof VTRateLimitError && posts === 1, 'upload cooldown rejects before file I/O or a second POST');
+            respond(vtai ? report : { data: { id: hash, attributes: { last_analysis_stats: report.data.last_analysis_stats } } });
+            const beforeQuery = gets;
+            const queryError = await fail(() => uploadLimited.checkHash(hash));
+            assert(vtai ? queryError === undefined && gets === beforeQuery + 1 : queryError instanceof VTRateLimitError && gets === beforeQuery,
+                vtai ? 'VTAI upload cooldown leaves queries available' : 'standard VT upload cooldown also blocks queries');
+        }
+
+        const large = path.join(tmp, 'large-fixture');
+        const fd = fs.openSync(large, 'w');
+        fs.ftruncateSync(fd, 33 * 1024 * 1024);
+        fs.closeSync(fd);
+        const largeClient = new VTApiClient('key');
+        reject(limited('3600'));
+        posts = 0;
+        const largeError = await fail(() => largeClient.uploadFile(large));
+        assert(largeError instanceof VTRateLimitError && posts === 0, '429 from the standard upload URL lookup prevents the upload POST');
+
+        const transportError = new Error('synthetic transport failure');
+        posts = 0;
+        (axios as any).post = async () => { posts++; throw transportError; };
+        const timeout = await fail(() => new VTApiClient('key', true).uploadFile(file));
+        assert(timeout === transportError && posts === 1, 'an ambiguous failed upload is never automatically replayed');
+
+        const { Scanner } = require('./scanner');
+        const scanner = new Scanner('key', { info() {}, warn() {}, error() {} }, 32, 'ask', true);
+        reject(limited('86400'));
+        await fail(() => scanner.api.checkHash(hash));
+        let slots = 0;
+        scanner.limiter.acquire = async () => { slots++; };
+        const queued = await fail(() => scanner.checkHash(hash));
+        const scan = await fail(() => scanner.scanFile(file));
+        assert(queued instanceof VTRateLimitError && scan instanceof VTRateLimitError && slots === 0,
+            'scanner rejects a query cooldown before waiting for a local rate-limiter slot');
+        (axios as any).post = async () => { throw limited('3600'); };
+        await fail(() => scanner.api.uploadFile(file));
+        const consented = await scanner.uploadWithConsent(file);
+        assert(consented.verdict === 'unknown' && slots === 0,
+            'consented upload cooldown does not wait in the local request queue or claim analysis');
+    } finally {
+        axios.get = savedGet;
+        axios.post = savedPost;
+        Date.now = savedNow;
+        // Read streams are destroyed by uploadFile; allow pending closes before deleting fixtures.
+        await new Promise(resolve => setImmediate(resolve));
+        fs.rmSync(tmp, { recursive: true, force: true });
+    }
+}
+
+async function testApiReportValidation() {
+    console.log('\n=== Hash lookup response validation ===\n');
+    const savedGet = axios.get, savedPost = axios.post;
+    const hash = 'a'.repeat(64);
+    const stats = { malicious: 2, suspicious: 1, harmless: 3, undetected: 70 };
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vt-report-'));
+    const file = writeFile(tmp, 'fixture.sh', '#!/bin/sh\necho harmless-fixture\n');
+    const fail = async (action: () => Promise<unknown>): Promise<unknown> => {
+        try { await action(); return undefined; } catch (error) { return error; }
+    };
+    let posts = 0;
+    (axios as any).post = async () => { posts++; throw new Error('Unexpected upload'); };
+    try {
+        for (const vtai of [true, false]) {
+            const body = (fields: any) => ({ data: { id: hash, ...(vtai ? fields : { attributes: fields }) } });
+            const malformed = [undefined, {}, { data: null }, { data: [] }, body({}),
+                body({ last_analysis_stats: null }), body({ last_analysis_stats: {} }),
+                body({ last_analysis_stats: { ...stats, malicious: -1 } }),
+                body({ last_analysis_stats: { ...stats, suspicious: '0' } }),
+                body({ last_analysis_stats: { ...stats, malicious: false } }),
+                body({ last_analysis_stats: { ...stats, harmless: NaN } }),
+                body({ last_analysis_stats: { ...stats, undetected: Infinity } }),
+                body({ last_analysis_stats: { ...stats, malicious: 0.5 } }),
+                { data: { ...body({ last_analysis_stats: stats }).data, id: 'invalid' } },
+                { data: { ...body({ last_analysis_stats: stats }).data, id: 'b'.repeat(64) } },
+                body({ last_analysis_stats: stats, [vtai ? 'ai_insights' : 'crowdsourced_ai_results']: 'invalid' }),
+                body({ last_analysis_stats: stats, [vtai ? 'ai_insights' : 'crowdsourced_ai_results']: [{ verdict: 7 }] }),
+                body({ last_analysis_stats: stats, [vtai ? 'ai_insights' : 'crowdsourced_ai_results']: [[]] }),
+            ];
+            for (const [i, data] of malformed.entries()) {
+                (axios as any).get = async () => ({ data });
+                const error = await fail(() => new VTApiClient('key', vtai).checkHash(hash));
+                assert(error instanceof Error && error.message === 'Invalid VirusTotal report response.',
+                    `${vtai ? 'VTAI' : 'standard VT'} malformed response ${i} fails without becoming not-found or clean`);
+            }
+
+            (axios as any).get = async () => ({ data: body({ last_analysis_stats: stats }) });
+            const client = new VTApiClient('key', vtai);
+            const report = await client.checkHash(hash);
+            assert(report?.stats.malicious === 2 && report.stats.suspicious === 1,
+                `${vtai ? 'VTAI' : 'standard VT'} valid report preserves positive detections`);
+            (axios as any).get = async () => { throw { isAxiosError: true, response: { status: 404 } }; };
+            assert(await client.checkHash(hash) === null, 'HTTP 404 alone returns a not-found result');
+            for (const status of [401, 403, 500, 503]) {
+                const upstream = { isAxiosError: true, response: { status } };
+                (axios as any).get = async () => { throw upstream; };
+                assert(await fail(() => client.checkHash(hash)) === upstream, `HTTP ${status} is not converted to an unknown hash`);
+            }
+            const network = new Error('synthetic offline failure');
+            (axios as any).get = async () => { throw network; };
+            assert(await fail(() => client.checkHash(hash)) === network, 'transport failure is not converted to an unknown hash');
+
+            (axios as any).get = async () => ({ data: body({}) });
+            const { Scanner } = require('./scanner');
+            const scanner = new Scanner('key', { info() {}, warn() {}, error() {} }, 32, 'always_upload', vtai);
+            const error = await fail(() => scanner.scanFile(file));
+            assert(error instanceof Error && posts === 0, 'malformed lookup cannot trigger scanner auto-upload or a clean verdict');
+        }
+    } finally {
+        axios.get = savedGet;
+        axios.post = savedPost;
+        fs.rmSync(tmp, { recursive: true, force: true });
+    }
+}
+
 function testAgentCredentialsPersistence() {
     console.log('\n=== Agent Credentials Persistence Tests ===\n');
 
@@ -3424,6 +3643,8 @@ async function main() {
     testContextEnrichment();
     testAutoWatchDirs();
     testVtaiResponseParsing();
+    await testApiCooldown();
+    await testApiReportValidation();
     testAgentCredentialsPersistence();
     testUserKeyPriority();
     await testVtaiAutoRegistrationFlow();
@@ -5808,4 +6029,3 @@ function testHandlerJsStructure() {
 }
 
 main();
-
