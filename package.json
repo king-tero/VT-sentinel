@@ -1,6 +1,6 @@
 {
   "name": "openclaw-plugin-vt-sentinel",
-  "version": "0.12.3",
+  "version": "0.12.4",
   "displayName": "VT Sentinel",
   "description": "VirusTotal Sentinel for OpenClaw — malware detection, active protection, and AI-powered code analysis for OpenClaw agents.",
   "main": "dist/index.js",

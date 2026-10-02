@@ -5,6 +5,23 @@ All notable changes to `openclaw-plugin-vt-sentinel`.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.12.4 — Respect API retry deadlines
+
+### Fixed
+
+- Honor HTTP 429 `Retry-After` seconds and dates, with the VTAI response's
+  `retry_after_seconds` as a fallback and a one-minute fallback when neither is
+  valid. Further requests fail locally until the deadline, without sleeping or
+  automatically replaying uploads. Cooldowns are held by each client instance.
+- Keep VTAI query and upload cooldowns separate; standard VirusTotal requests
+  share a cooldown. The scanner checks availability before waiting for a local
+  request slot.
+- Treat only HTTP 404 hash lookups as unknown files. Reject malformed successful
+  reports instead of interpreting missing statistics as clean or uploading the
+  file after a malformed response.
+- Restore the optional macOS `fsevents` entry missing from the dependency lock,
+  so clean installs can validate the lock consistently.
+
 ## 0.12.3 — Dependency hygiene + OSS polish
 
 No runtime behavior changes. Pure housekeeping release.

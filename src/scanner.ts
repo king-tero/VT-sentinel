@@ -188,6 +188,7 @@ export class Scanner {
     private async scanAutoUpload(filePath: string, sha256: string, category: FileCategory): Promise<ScanResult> {
         const fileName = path.basename(filePath);
 
+        this.api.assertAvailable('query');
         await this.limiter.acquire();
         const report = await this.api.checkHash(sha256);
 
@@ -196,9 +197,9 @@ export class Scanner {
         }
 
         this.logger.info(`[VT-Sentinel] Unknown ${category} file ${fileName}, uploading...`);
-        await this.limiter.acquire();
-
         try {
+            this.api.assertAvailable('upload');
+            await this.limiter.acquire();
             const upload = await this.api.uploadFile(filePath);
             return this.result(filePath, sha256, category, 'pending',
                 `Uploaded for analysis (${upload.analysisId}). Results pending.`);
@@ -229,6 +230,7 @@ export class Scanner {
         const fileName = path.basename(filePath);
 
         // Step 1: Hash check (always safe, reveals nothing)
+        this.api.assertAvailable('query');
         await this.limiter.acquire();
         const report = await this.api.checkHash(sha256);
 
@@ -274,6 +276,7 @@ export class Scanner {
     private async scanForced(filePath: string, sha256: string, category: FileCategory): Promise<ScanResult> {
         const fileName = path.basename(filePath);
 
+        this.api.assertAvailable('query');
         await this.limiter.acquire();
         const report = await this.api.checkHash(sha256);
 
@@ -292,6 +295,7 @@ export class Scanner {
     private async hashCheckOnly(filePath: string, sha256: string, category: FileCategory): Promise<ScanResult> {
         const fileName = path.basename(filePath);
 
+        this.api.assertAvailable('query');
         await this.limiter.acquire();
         const report = await this.api.checkHash(sha256);
 
@@ -309,8 +313,9 @@ export class Scanner {
         filePath: string, sha256: string, category: FileCategory, fileName: string,
     ): Promise<ScanResult> {
         this.logger.info(`[VT-Sentinel] Uploading SENSITIVE file ${fileName} (user consented)...`);
-        await this.limiter.acquire();
         try {
+            this.api.assertAvailable('upload');
+            await this.limiter.acquire();
             const upload = await this.api.uploadFile(filePath);
             return this.result(filePath, sha256, category, 'pending',
                 `Uploaded with consent (${upload.analysisId}). May contain macros or embedded threats — analysis pending.`);
@@ -358,6 +363,7 @@ export class Scanner {
      * Quick hash check — no classification, no upload.
      */
     async checkHash(hash: string): Promise<ScanResult | null> {
+        this.api.assertAvailable('query');
         await this.limiter.acquire();
         const report = await this.api.checkHash(hash);
         if (!report) return null;
