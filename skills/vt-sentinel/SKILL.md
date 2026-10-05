@@ -183,7 +183,7 @@ VT Sentinel automatically protects the system in real-time:
 3. **Quarantine**: Malicious files are renamed to `.QUARANTINED` so they cannot be executed
 4. **Execution blocking**: Any `exec`/`bash` command that references a blocked file is intercepted and prevented BEFORE execution
 5. **Command pattern inspection**: Commands are analyzed for dangerous patterns BEFORE execution, even when no file is involved:
-   - **Pipe-to-shell**: `curl | bash`, `wget | sh`, `base64 -d | bash` — remote code execution without touching disk
+   - **Pipe-to-shell**: remote downloads piped directly into a shell, decoded payloads piped into a shell — remote code execution without touching disk
    - **SSH key injection**: Appending to `authorized_keys` — backdoor persistence
    - **Data exfiltration**: Sending data to webhook.site, requestbin, pipedream, etc.
    - **Credential theft**: Piping `.env`, SSH keys, or AWS credentials to network tools
