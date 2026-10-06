@@ -5,7 +5,7 @@ All notable changes to `openclaw-plugin-vt-sentinel`.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.12.6 — Respect log-only mode and clarify capabilities
 
 ### Fixed
 

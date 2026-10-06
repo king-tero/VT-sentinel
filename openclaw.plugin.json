@@ -2,7 +2,7 @@
   "id": "openclaw-plugin-vt-sentinel",
   "name": "VT Sentinel",
   "description": "VirusTotal antivirus and active protection: background file scans with policy-controlled uploads, command inspection/blocking, quarantine, and persistent configuration. Registers with VTAI on first scan/lookup when no API key is configured.",
-  "version": "0.12.5",
+  "version": "0.12.6",
   "skills": ["./skills"],
   "contracts": {
     "tools": [
