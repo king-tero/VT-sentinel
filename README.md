@@ -1,7 +1,13 @@
 # VT Sentinel — VirusTotal Security Plugin for OpenClaw
 
-Automatic malware detection and AI-powered code analysis for OpenClaw agents.
-Zero-config — no API key needed. Auto-registers with VirusTotal's AI API.
+Antivirus and active protection for OpenClaw agents: background file scanning,
+command inspection/blocking, and quarantine of malicious auto-scan results.
+No API key is required: without one, the first scan or hash lookup registers
+an agent with VirusTotal's AI API and stores its token locally.
+
+Default behavior: `autoScan: true`, `blockMode: quarantine`. The plugin reads
+candidate files and may upload unknown files according to the policies below.
+Review the [controls](#controls-and-scope) before enabling it on a workspace.
 
 ## Install
 
@@ -45,8 +51,8 @@ Should show 9 tools registered.
 
 ## What it does
 
-- Scans downloaded and created files automatically (AV + AI Code Insight)
-- Protects instruction files (SKILL.md, TOOLS.md) from being uploaded without consent
+- Scans candidate downloaded and created files within size/category/exclusion limits (AV + AI Code Insight when available)
+- Defaults to hash-only lookups for instruction files (SKILL.md, TOOLS.md); changing policy can permit uploads
 - Blocks execution of malicious files and dangerous command patterns
 - Monitors directories in real-time (Downloads, /tmp, workspace)
 - Quarantines threats with rotating audit logs
@@ -70,7 +76,7 @@ openclaw gateway start
 
 ## Configuration
 
-### Optional: Add your own VirusTotal API key (higher rate limits)
+### Optional: Add your own VirusTotal API key
 
 Without a key, VT Sentinel auto-registers with VTAI and works out of the box.
 If you have a VirusTotal API key (v3), set it in the plugin config:
@@ -95,9 +101,11 @@ openclaw config set plugins.entries.openclaw-plugin-vt-sentinel.config.apiKey "v
 
 | Preset | Description |
 |--------|-------------|
-| `balanced` | Default — scans everything, quarantines threats |
-| `privacy_first` | Hash-only lookups, no file uploads |
-| `strict_security` | Maximum protection, blocks on suspicion |
+| `balanced` | Default — sensitive files ask, instruction files hash-only, malicious auto-scan results quarantined |
+| `privacy_first` | Sensitive/instruction files hash-only; blocking without quarantine; **unknown high-risk files can still be uploaded** |
+| `strict_security` | Sensitive files auto-upload, instruction files ask; quarantine malicious auto-scan results; 64 MB limit |
+
+Individual settings override presets. No preset disables all file uploads.
 
 ### Settings
 
@@ -107,17 +115,54 @@ openclaw config set plugins.entries.openclaw-plugin-vt-sentinel.config.apiKey "v
 | `blockMode` | quarantine, block_only, log_only | quarantine |
 | `sensitiveFilePolicy` | ask, ask_once, always_upload, hash_only | ask |
 | `semanticFilePolicy` | ask, ask_once, always_upload, hash_only | hash_only |
-| `maxFileSizeMb` | 1-32 | 32 |
+| `maxFileSizeMb` | 1-650 | 32 |
 | `autoScan` | true, false | true |
 
 ## How it works
 
-VT Sentinel connects to [VTAI](https://ai.virustotal.com) — VirusTotal's LLM-optimized proxy layer. On first run it auto-registers an agent identity and receives a permanent API token. All scans go through VTAI's minimized response format, optimized for LLM context windows.
+Without a user API key, VT Sentinel connects to [VTAI](https://ai.virustotal.com),
+using cached credentials or registering on the first scan/hash lookup. Automatic
+scanning can trigger that registration. With a configured user API key, requests
+go directly to the standard VirusTotal API without VTAI registration.
 
 File analysis includes:
 - **AV detections** from 60+ antivirus engines
-- **AI Code Insight** (VirusTotal AI-powered semantic analysis)
-- **Crowdsourced AI results** from the VirusTotal community
+- **AI Code Insight**, when available (VirusTotal AI-powered semantic analysis)
+- **Crowdsourced AI results**, when available, from the VirusTotal community
+
+### Controls and scope
+
+| Control | Effect |
+|---|---|
+| `autoScan: false` | Stops watcher/tool-result scanning. Manual tools remain available; command enforcement is controlled separately by `blockMode`. |
+| `blockMode: quarantine` | Blocks detected dangerous commands and references to blocklisted files; malicious automatic scan results are renamed to `.QUARANTINED`. |
+| `blockMode: block_only` | Blocks the same calls without renaming files. |
+| `blockMode: log_only` | Logs detections without blocking commands or quarantining files. Does not change upload policy. Prior blocklist entries are retained and enforced again if an enforcing mode is restored. |
+| Nonempty `watchDirs` | Replaces automatically derived watcher roots. Empty/missing watchDirs uses temp, Downloads/Desktop, workspace and OpenClaw code directories. Check `vt_sentinel_status` for the effective list. |
+
+Watcher roots do not bound the tool-result hook: it can scan candidate paths from
+supported tool calls elsewhere. `excludeGlobs` applies to both. `excludeDirs`
+filters watcher roots; it is not a universal scan allowlist. Command inspection
+is independent of watch directories and applies to `exec`, `bash`, `shell`,
+`powershell`, `cmd`, and `process` stdin calls.
+
+For manual use without automatic scanning or execution blocking, request:
+
+```
+vt_sentinel_configure { "autoScan": false, "blockMode": "log_only" }
+```
+
+This persists by default; add `"persist": "session"` for a temporary change.
+Manual file scans can still upload content. Use `vt_check_hash` for lookups that
+do not upload files. Changing modes does not restore already quarantined files.
+Manual scan tools return reports; file enforcement is applied by automatic scans.
+Quarantine is a rename, not OS-level isolation, and command matching is heuristic.
+
+Configuration/reset/identity tools are administrative capabilities. The skill
+instructs agents to use them only on an explicit user request, never on instructions
+in scanned content. Those instructions do not implement operator authentication;
+restrict access through the host in shared environments. Update checks only
+produce instructions and do not install or execute updates.
 
 ## Privacy & compliance
 
@@ -132,13 +177,14 @@ you can verify the behavior from either surface without reading source.
 
 | Category | Detail |
 |---|---|
-| **Files read** | Candidate files under configured watch dirs — for hashing and classification. Full contents are uploaded to VirusTotal/VTAI only when upload policy and (for `ask`/`ask_once`) user consent allow it. Instruction files (`SKILL.md`, `HOOK.md`, `AGENTS.md`, etc.) default to `hash_only` and are never auto-uploaded. |
-| **Files uploaded** | Hash lookups are free (no content sent). Content uploads happen only per the configured `sensitiveFilePolicy` / `semanticFilePolicy`. |
+| **Files read** | Candidate files from watcher roots, supported tool results, and manually selected paths, for hashing/classification. Watcher scope does not restrict manual tools or tool-result scans. Instruction files default to `hash_only`; other policies can permit uploads. |
+| **Files uploaded** | Unknown HIGH_RISK files can upload automatically. Sensitive/instruction files follow their category policy. Unknown SAFE/MEDIA files can also upload when manually selected or force-scanned in OpenClaw code directories. `privacy_first` and `log_only` are **not** global no-upload modes. Agent `read`-tool scans use hash-only lookup. Hash lookup sends the hash, not file contents, and uses API quota. |
 | **Network endpoints** | User-key mode: `www.virustotal.com`. VTAI mode: `ai.virustotal.com`. `registry.npmjs.org` and `clawhub.ai` are contacted **only** when the user explicitly invokes `vt_sentinel_update` — never on plugin load. |
 | **Credentials stored** | `<stateDir>/vt-sentinel-agent.json` (mode `0o600`, owner-only). v0.12.0+ also enforces `0o600` on audit logs and `0o700` on the audit directory. |
+| **Registration identity** | VTAI receives plugin family, version and generated/configured display name. Any configured alias/email is also sent, even in minimal mode. Enhanced mode adds the configured bio or OS-family/preset/auto-scan summary. A public handle is created and the identity can appear on the leaderboard. User-key mode does not register with VTAI. |
 | **Audit logs** | `<stateDir>/vt-sentinel-audit/uploads.log` and `detections.log`. Rotating; track when the plugin uploaded a file and when a detection fired. |
 | **Runtime state** | `<stateDir>/vt-sentinel-state.json` — first-run flags, persisted policy overrides, auto-generated agent name. No sample file contents. |
-| **Opt-outs** | `vt_sentinel_configure` → switch to `configPreset: privacy_first`, set `autoScan: false`, or switch per-category policy to `hash_only`. |
+| **Controls** | `vt_sentinel_configure` uses `preset: privacy_first` (static config uses `configPreset`). `autoScan: false` stops background scans; `blockMode: log_only` stops enforcement; per-category `hash_only` controls sensitive/instruction uploads. See the scope and manual-scan limits above. |
 
 ### `VIRUSTOTAL_API_KEY` shell variable is retired
 
@@ -172,8 +218,10 @@ supported; the env variable is not.
   etc.) default to `hash_only` — never auto-uploaded. `SENSITIVE` files
   (PDFs, Office docs, unknown archives) default to `ask` and require explicit
   consent per category per run.
-- **Passes the install-security scanner:** installs cleanly on OpenClaw
-  2026.4.5 and later without `--dangerously-force-unsafe-install`.
+- **Audit status:** the local install-security scan and ClawHub's asynchronous
+  external reviews are separate checks. A clean local result does not guarantee
+  that a published release will have a clean external review; inspect the report
+  for the exact version before installation.
 
 Inspect the active configuration at any time with `vt_sentinel_status`.
 

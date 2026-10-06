@@ -1,7 +1,7 @@
 {
   "id": "openclaw-plugin-vt-sentinel",
   "name": "VT Sentinel",
-  "description": "VirusTotal Sentinel for OpenClaw — malware detection, active protection, and AI-powered code analysis.",
+  "description": "VirusTotal antivirus and active protection: background file scans with policy-controlled uploads, command inspection/blocking, quarantine, and persistent configuration. Registers with VTAI on first scan/lookup when no API key is configured.",
   "version": "0.12.5",
   "skills": ["./skills"],
   "contracts": {
@@ -28,12 +28,12 @@
       "watchDirs": {
         "type": "array",
         "items": { "type": "string" },
-        "description": "Directories to monitor for new files"
+        "description": "Nonempty list replaces automatically derived watcher roots. Empty/missing uses temp, Downloads/Desktop, workspace and OpenClaw code directories. Does not restrict manual or tool-result scans."
       },
       "autoScan": {
         "type": "boolean",
         "default": true,
-        "description": "Automatically scan new files in watched directories"
+        "description": "Enable watcher and tool-result scans. Command enforcement is independently controlled by blockMode; manual tools remain available."
       },
       "maxFileSizeMb": {
         "type": "number",
@@ -56,7 +56,7 @@
         "type": "string",
         "enum": ["all", "threats_only", "silent"],
         "default": "all",
-        "description": "Notification verbosity: all = log everything, threats_only = only malicious/suspicious, silent = no logs"
+        "description": "Scan notification verbosity: all, threats_only, or silent. Enforced command blocks and operational/audit logs remain visible; log_only command notices respect silent."
       },
       "excludeDirs": {
         "type": "array",
@@ -72,7 +72,7 @@
         "type": "string",
         "enum": ["quarantine", "block_only", "log_only"],
         "default": "quarantine",
-        "description": "How to handle malicious files: quarantine = rename + block exec, block_only = block exec only, log_only = just log"
+        "description": "quarantine = block dangerous commands and blocklisted files, rename malicious auto-scan detections; block_only = block without renaming; log_only = log detections without blocking or quarantine. Does not change upload policy."
       },
       "showCleanScanLogs": {
         "type": "boolean",
@@ -83,7 +83,7 @@
         "type": "string",
         "enum": ["balanced", "privacy_first", "strict_security"],
         "default": "balanced",
-        "description": "Configuration preset. Individual settings override the preset."
+        "description": "Preset; individual settings override it. privacy_first keeps sensitive/instruction files hash-only, but unknown high-risk files can still upload."
       },
       "agentDisplayName": {
         "type": "string",
@@ -105,7 +105,7 @@
         "type": "string",
         "enum": ["minimal", "enhanced"],
         "default": "minimal",
-        "description": "What metadata to send during registration. minimal = display_name only. enhanced = also sends OS family, preset, and auto-scan status (no personal data)."
+        "description": "Registration always sends family, version and display name, plus any configured alias/email. enhanced also sends the configured bio or an OS-family/preset/auto-scan summary."
       }
     },
     "required": []
