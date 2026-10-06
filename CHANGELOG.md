@@ -5,6 +5,15 @@ All notable changes to `openclaw-plugin-vt-sentinel`.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.12.5 — Clarify defensive command documentation
+
+### Fixed
+
+- Replace literal pipe-to-shell examples in the packaged skill instructions
+  with descriptive text to avoid documentation-triggered security audit
+  findings. Runtime protection and command detection signatures are unchanged.
+  Thanks to @igortheclaw for #4.
+
 ## 0.12.4 — Respect API retry deadlines
 
 ### Fixed

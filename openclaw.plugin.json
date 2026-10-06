@@ -2,7 +2,7 @@
   "id": "openclaw-plugin-vt-sentinel",
   "name": "VT Sentinel",
   "description": "VirusTotal Sentinel for OpenClaw — malware detection, active protection, and AI-powered code analysis.",
-  "version": "0.12.4",
+  "version": "0.12.5",
   "skills": ["./skills"],
   "contracts": {
     "tools": [
