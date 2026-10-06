@@ -5,6 +5,30 @@ All notable changes to `openclaw-plugin-vt-sentinel`.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- Honor `blockMode: log_only` for dangerous command patterns, combined
+  download/execution detection, and previously blocklisted paths, including
+  background-process stdin. Detections are logged without blocking; silent
+  notifications suppress these notices. Enforcing modes retain their protections.
+- Apply the current block mode when asynchronous file scans finish, so switching
+  to `log_only` during a scan prevents quarantine or new blocklist entries.
+- Show command enforcement and automatic scanning independently in status and
+  onboarding; do not claim active enforcement in log-only mode.
+
+### Changed
+
+- Align the skill/manifest descriptions with the plugin's active antivirus
+  capabilities and explain administrative authorization, persistent state,
+  watcher versus tool-result scope, and VTAI registration metadata.
+- Correct privacy claims: `privacy_first` is hash-only for sensitive/instruction
+  files, not high-risk files. Manual safe/media scans and forced code-directory
+  scans can upload unknown contents. `log_only` does not change upload policy.
+- Distinguish local install-security checks from asynchronous external reviews.
+  No published audit verdict is implied by these changes.
+
 ## 0.12.5 — Clarify defensive command documentation
 
 ### Fixed
