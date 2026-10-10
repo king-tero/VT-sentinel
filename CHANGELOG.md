@@ -5,6 +5,21 @@ All notable changes to `openclaw-plugin-vt-sentinel`.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.12.7 — Serialize scanner initialization and identity changes
+
+### Fixed
+
+- Share automatic registration across concurrent scans and lookups within one
+  plugin instance. A failed attempt is shared; a later group can retry once.
+- Apply the current upload policies and size limit when pending registration
+  finishes, including configuration changes and resets made while it is waiting.
+- Order explicit re-registrations after pending credential operations, preserving
+  each requested new identity and backing up the identity it actually replaces.
+- Cancel watcher debounce timers and discard automatic scan continuations after
+  stopping or disabling auto-scan. An issued credential is saved for reuse after
+  restart, without reviving the old scan. Manual tools remain available when
+  `autoScan` is disabled.
+
 ## 0.12.6 — Respect log-only mode and clarify capabilities
 
 ### Fixed

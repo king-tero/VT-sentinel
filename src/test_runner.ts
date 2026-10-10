@@ -1,3 +1,5 @@
+import './test-isolation';
+import { testScannerLifecycle } from './scanner-lifecycle.test';
 /**
  * Test runner for VT Sentinel plugin.
  * Tests classifier (magic-bytes-first), cache, path extractor, hook integration,
@@ -2057,26 +2059,27 @@ function testDownloadPatternCoverage() {
     paths = extractFromCommand('chmod +x "/tmp/my script.sh"');
     assert(paths.some(p => p.path === '/tmp/my script.sh'), 'chmod +x quoted path with spaces');
 
-    // ── Tilde expansion ─────────────────────────────────────────────
-    // Tested via filterExisting (tilde paths resolve to $HOME)
-    const home = process.env.HOME || '';
+    // Resolve the real HOME string without reading or writing files there.
+    // The stat result comes from a file in the test sandbox.
+    const home = process.env.HOME || process.env.USERPROFILE || '';
     if (home) {
-        const tildeFile = path.join(home, '.bashrc');
-        if (fs.existsSync(tildeFile)) {
+        const file = path.join(os.tmpdir(), 'vt-tilde-fixture');
+        fs.writeFileSync(file, 'test');
+        const fixtureStat = fs.statSync(file);
+        const expected = path.join(home, '.vt-sentinel-tilde-test');
+        const fsRuntime = require('fs');
+        const savedStat = fsRuntime.statSync;
+        fsRuntime.statSync = ((target: any, ...args: any[]) => target === expected
+            ? fixtureStat : (savedStat as any)(target, ...args)) as typeof fs.statSync;
+        try {
             const tildePaths = filterExisting([
-                { path: '~/.bashrc', source: 'exec_target', reason: 'test' }
+                { path: '~/.vt-sentinel-tilde-test', source: 'exec_target', reason: 'test' },
             ]);
-            assert(tildePaths.length === 1, 'Tilde ~ expanded to $HOME in filterExisting');
-            assert(tildePaths[0].path === tildeFile, 'Expanded path matches $HOME/.bashrc');
-        } else {
-            // Create a temp file under $HOME for testing
-            const testFile = path.join(home, '.vt-sentinel-tilde-test');
-            fs.writeFileSync(testFile, 'test');
-            const tildePaths = filterExisting([
-                { path: '~/.vt-sentinel-tilde-test', source: 'exec_target', reason: 'test' }
-            ]);
-            assert(tildePaths.length === 1, 'Tilde ~ expanded to $HOME in filterExisting');
-            fs.unlinkSync(testFile);
+            assert(tildePaths.length === 1, 'Tilde ~ expanded to HOME in filterExisting');
+            assert(tildePaths[0]?.path === expected, 'Expanded path uses the environment HOME');
+        } finally {
+            fsRuntime.statSync = savedStat;
+            fs.unlinkSync(file);
         }
     }
 }
@@ -3444,7 +3447,7 @@ async function testQuarantineLoopPrevention() {
             plugins: {
                 entries: {
                     'openclaw-plugin-vt-sentinel': {
-                        config: { apiKey: 'TEST_KEY', watchDirs: [], autoScan: false },
+                        config: { apiKey: 'TEST_KEY', watchDirs: [], autoScan: true },
                     },
                 },
             },
@@ -3495,7 +3498,7 @@ function testWorkspaceCoverage() {
     fs.unlinkSync(comZipPath);
 
     // Test 2: workspace path is interesting (path-extractor)
-    const home = process.env.HOME || process.env.USERPROFILE || '/home/test';
+    const home = os.homedir();
     const stateDir = process.env.OPENCLAW_STATE_DIR || path.join(home, '.openclaw');
     const wsPath = path.join(stateDir, 'workspace', 'eicar.com');
     const { getInterestingDirs } = require('./path-extractor');
@@ -3547,7 +3550,7 @@ async function testSelfExclusion() {
     // Test 2: isSelfPath does NOT match files outside our plugin directory
     assert(!isSelfPath('/tmp/evil.sh'), 'Self-exclusion: /tmp/evil.sh is NOT self');
     assert(!isSelfPath(path.join(os.tmpdir(), 'test.js')), 'Self-exclusion: tmpdir file is NOT self');
-    const home = process.env.HOME || process.env.USERPROFILE || '/tmp';
+    const home = os.homedir();
     assert(!isSelfPath(path.join(home, '.openclaw', 'workspace', 'download.exe')), 'Self-exclusion: workspace file is NOT self');
     assert(!isSelfPath(path.join(home, 'Downloads', 'malware.js')), 'Self-exclusion: Downloads file is NOT self');
 
@@ -3563,7 +3566,7 @@ async function testSelfExclusion() {
             plugins: {
                 entries: {
                     'openclaw-plugin-vt-sentinel': {
-                        config: { apiKey: 'TEST_KEY', watchDirs: [], autoScan: false },
+                        config: { apiKey: 'TEST_KEY', watchDirs: [], autoScan: true },
                     },
                 },
             },
@@ -3817,6 +3820,7 @@ async function main() {
 
     // V31 / 0.12.0 — Compliance snapshot + security audit collector
     testComplianceSnapshot();
+    await testScannerLifecycle(assert);
 
     console.log(`\n=============================================`);
     console.log(`Results: ${passed} passed, ${failed} failed`);
@@ -6173,4 +6177,4 @@ function testHandlerJsStructure() {
     assert(!fs.existsSync(hookDir), 'v0.12.0: hooks/ directory retired from the package');
 }
 
-main();
+main().catch(error => { console.error(error); process.exit(1); });
