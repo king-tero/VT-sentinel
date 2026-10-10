@@ -202,6 +202,28 @@ function buildEnhancedBio(eff: { configPreset?: string; autoScan?: boolean }): s
 function vtSentinelPlugin(api: PluginApi) {
     let watcher: chokidar.FSWatcher | null = null;
     let scanner: Scanner | null = null;
+    let scannerInit: Promise<Scanner | null> | null = null;
+    let scannerInitGeneration = 0;
+    let credentialOperations: Promise<void> = Promise.resolve();
+    let serviceStopped = false;
+    let serviceGeneration = 0;
+    let automaticGeneration = 0;
+    const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+    // Explicit re-registrations remain distinct operations, ordered after any
+    // pending auto-registration. A failed operation must not poison the queue.
+    const withCredentialOperation = <T>(operation: () => Promise<T>): Promise<T> => {
+        const result = credentialOperations.then(operation);
+        credentialOperations = result.then(() => {}, () => {});
+        return result;
+    };
+
+    const automaticScanActive = (generation: number): boolean =>
+        !serviceStopped && generation === automaticGeneration && configManager.getEffective().autoScan;
+
+    const scannerUnavailable = () => textResponse(serviceStopped
+        ? 'Error: VT-Sentinel service is stopped.'
+        : 'Error: VT-Sentinel scanner initialization failed or was interrupted. Retry the operation.');
     /** Tracks root directories passed to chokidar. Never use getWatched() for diffs. */
     const watchRoots = new Set<string>();
 
@@ -338,37 +360,56 @@ function vtSentinelPlugin(api: PluginApi) {
      * tracked locally in the `credentialMode` closure variable.
      */
     const ensureScanner = async (): Promise<Scanner | null> => {
-        if (scanner) return scanner;
-        const cfg = getConfig();
-        const eff = configManager.getEffective();
-        const userApiKey = typeof cfg?.apiKey === 'string' && cfg.apiKey.trim().length > 0
-            ? cfg.apiKey.trim()
-            : undefined;
+        const generation = serviceGeneration;
+        if (serviceStopped) return null;
 
-        if (userApiKey) {
-            scanner = new Scanner(userApiKey, api.logger, eff.maxFileSizeMb, eff.sensitiveFilePolicy, false, eff.semanticFilePolicy);
-            credentialMode = 'user_key';
-            api.logger.info('[VT-Sentinel] Using user-provided API key (standard VT API)');
-        } else {
-            // VTAI auto-registration flow
-            let creds = loadAgentCredentials();
-            if (!creds) {
-                try {
-                    creds = await registerAgent(buildRegistrationOpts());
-                    saveAgentCredentials(creds);
-                    api.logger.info(`[VT-Sentinel] Auto-registered agent: ${creds.publicHandle}`);
-                } catch (err: any) {
-                    api.logger.error(`[VT-Sentinel] VTAI agent registration failed: ${err.message}`);
-                    return null;
-                }
-            } else {
-                api.logger.info(`[VT-Sentinel] Using cached VTAI agent: ${creds.publicHandle}`);
-            }
-            scanner = new Scanner(creds.agentToken, api.logger, eff.maxFileSizeMb, eff.sensitiveFilePolicy, true, eff.semanticFilePolicy);
-            credentialMode = 'vtai';
+        // A restart waits for the previous registration to settle, preserving
+        // an already issued token, before building a scanner for the new run.
+        if (scannerInit && scannerInitGeneration !== generation) {
+            await scannerInit;
+            if (serviceStopped || generation !== serviceGeneration) return null;
+            return ensureScanner();
         }
-
-        return scanner;
+        if (!scannerInit) {
+            scannerInitGeneration = generation;
+            scannerInit = withCredentialOperation(async () => {
+                if (serviceStopped || generation !== serviceGeneration) return null;
+                if (scanner) return scanner;
+                const cfg = getConfig();
+                const userApiKey = typeof cfg?.apiKey === 'string' && cfg.apiKey.trim().length > 0
+                    ? cfg.apiKey.trim()
+                    : undefined;
+                let token = userApiKey;
+                if (!token) {
+                    let creds = loadAgentCredentials(resolvedStateDir);
+                    if (!creds) {
+                        try {
+                            creds = await registerAgent(buildRegistrationOpts());
+                            // Keep an issued credential even if stop occurred while
+                            // awaiting registration; it is reused on the next start.
+                            saveAgentCredentials(creds, resolvedStateDir);
+                            api.logger.info(`[VT-Sentinel] Auto-registered agent: ${creds.publicHandle}`);
+                        } catch (err: any) {
+                            api.logger.error(`[VT-Sentinel] VTAI agent registration failed: ${err.message}`);
+                            return null;
+                        }
+                    } else {
+                        api.logger.info(`[VT-Sentinel] Using cached VTAI agent: ${creds.publicHandle}`);
+                    }
+                    token = creds.agentToken;
+                }
+                if (serviceStopped || generation !== serviceGeneration) return null;
+                // Configuration can change while registration is pending.
+                const eff = configManager.getEffective();
+                scanner = new Scanner(token, api.logger, eff.maxFileSizeMb,
+                    eff.sensitiveFilePolicy, !userApiKey, eff.semanticFilePolicy);
+                credentialMode = userApiKey ? 'user_key' : 'vtai';
+                if (userApiKey) api.logger.info('[VT-Sentinel] Using user-provided API key (standard VT API)');
+                return scanner;
+            }).finally(() => { scannerInit = null; });
+        }
+        const result = await scannerInit;
+        return !serviceStopped && generation === serviceGeneration ? result : null;
     };
 
     // --- Read scan registry: tracks files scanned on read by SHA-256 ---
@@ -613,7 +654,8 @@ function vtSentinelPlugin(api: PluginApi) {
         return false;
     };
 
-    const handleWatcherFile = async (filePath: string) => {
+    const handleWatcherFile = async (filePath: string, generation = automaticGeneration) => {
+        if (!automaticScanActive(generation)) return;
         if (filePath.endsWith('.QUARANTINED')) return;
         if (isSelfPath(filePath)) return;
 
@@ -627,9 +669,11 @@ function vtSentinelPlugin(api: PluginApi) {
 
         try {
             const s = await ensureScanner();
-            if (!s) return;
+            if (!s || !automaticScanActive(generation)) return;
+            if (configManager.getEffective().excludeGlobs.some(glob => matchGlob(filePath, glob))) return;
             const force = isForceScannedDir(filePath);
             const result = await s.scanFile(filePath, force);
+            if (!automaticScanActive(generation)) return;
             auditResult(result);
             // Policy may have changed while awaiting the remote scan.
             const blockMode = configManager.getEffective().blockMode;
@@ -718,7 +762,7 @@ function vtSentinelPlugin(api: PluginApi) {
     // --- Watcher lifecycle helpers ---
 
     const startWatcher = (): void => {
-        if (watcher) return; // already running
+        if (watcher || serviceStopped || !configManager.getEffective().autoScan) return;
 
         const eff = configManager.getEffective();
 
@@ -768,13 +812,15 @@ function vtSentinelPlugin(api: PluginApi) {
             depth: 0,
         });
 
-        const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+        const generation = automaticGeneration;
         const debouncedHandler = (filePath: string) => {
+            if (!automaticScanActive(generation)) return;
             const existing = debounceTimers.get(filePath);
             if (existing) clearTimeout(existing);
             debounceTimers.set(filePath, setTimeout(() => {
+                if (!automaticScanActive(generation)) return;
                 debounceTimers.delete(filePath);
-                handleWatcherFile(filePath);
+                void handleWatcherFile(filePath, generation);
             }, 1500));
         };
 
@@ -788,6 +834,9 @@ function vtSentinelPlugin(api: PluginApi) {
     };
 
     const stopWatcher = (): void => {
+        automaticGeneration++;
+        for (const timer of debounceTimers.values()) clearTimeout(timer);
+        debounceTimers.clear();
         if (watcher) {
             watcher.close();
             watcher = null;
@@ -802,6 +851,7 @@ function vtSentinelPlugin(api: PluginApi) {
         id: 'vt-sentinel-service',
 
         start: () => {
+            serviceStopped = false;
             const eff = configManager.getEffective();
             if (!eff.autoScan) {
                 api.logger.info('[VT-Sentinel] Service started (watcher disabled — autoScan=false)');
@@ -811,6 +861,8 @@ function vtSentinelPlugin(api: PluginApi) {
         },
 
         stop: () => {
+            serviceStopped = true;
+            serviceGeneration++;
             stopWatcher();
             if (scanner) {
                 scanner.clearCache();
@@ -844,7 +896,7 @@ function vtSentinelPlugin(api: PluginApi) {
                     stateDir: sd,
                     credentialMode: mode,
                     watchDirs: [...watchRoots],
-                    agentPublicHandle: loadAgentCredentials()?.publicHandle,
+                    agentPublicHandle: loadAgentCredentials(resolvedStateDir)?.publicHandle,
                     logModes,
                     source: 'runtime',
                 });
@@ -883,7 +935,7 @@ function vtSentinelPlugin(api: PluginApi) {
         },
         execute: async (_ctx: any, params: { path: string }) => {
             const s = await ensureScanner();
-            if (!s) return textResponse('Error: VT-Sentinel not configured (API key missing and VTAI registration failed)');
+            if (!s) return scannerUnavailable();
 
             try {
                 const result = await s.scanFile(params.path, true);
@@ -912,7 +964,7 @@ function vtSentinelPlugin(api: PluginApi) {
         },
         execute: async (_ctx: any, params: { hash: string }) => {
             const s = await ensureScanner();
-            if (!s) return textResponse('Error: VT-Sentinel not configured (API key missing and VTAI registration failed)');
+            if (!s) return scannerUnavailable();
 
             try {
                 const result = await s.checkHash(params.hash);
@@ -946,7 +998,7 @@ function vtSentinelPlugin(api: PluginApi) {
         },
         execute: async (_ctx: any, params: { path: string; upload: boolean }) => {
             const s = await ensureScanner();
-            if (!s) return textResponse('Error: VT-Sentinel not configured (API key missing and VTAI registration failed)');
+            if (!s) return scannerUnavailable();
 
             // Determine consent group from file category
             const fileCategory = FileClassifier.classify(params.path);
@@ -985,7 +1037,7 @@ function vtSentinelPlugin(api: PluginApi) {
         if (diff.changedFields.includes('autoScan')) {
             if (newConfig.autoScan && !watcher) {
                 startWatcher();
-            } else if (!newConfig.autoScan && watcher) {
+            } else if (!newConfig.autoScan) {
                 stopWatcher();
             }
         } else if (diff.watcherNeedsUpdate && watcher) {
@@ -1047,7 +1099,7 @@ function vtSentinelPlugin(api: PluginApi) {
                 stateDir: resolvedStateDir,
                 credentialMode: snapMode,
                 watchDirs: [...watchRoots],
-                agentPublicHandle: loadAgentCredentials()?.publicHandle,
+                agentPublicHandle: loadAgentCredentials(resolvedStateDir)?.publicHandle,
                 logModes: collectLogModes(resolvedStateDir),
                 source: 'runtime',
             });
@@ -1064,7 +1116,7 @@ function vtSentinelPlugin(api: PluginApi) {
                 updateCheckFailed,
                 agentIdentity: {
                     displayName: eff.agentDisplayName || stateStore.getAutoAgentName() || '(not set)',
-                    publicHandle: loadAgentCredentials()?.publicHandle,
+                    publicHandle: loadAgentCredentials(resolvedStateDir)?.publicHandle,
                     metadataMode: eff.agentMetadataMode || 'minimal',
                     humanAlias: eff.agentHumanAlias,
                 },
@@ -1225,7 +1277,7 @@ function vtSentinelPlugin(api: PluginApi) {
                 // Reconcile watcher state with restored config
                 if (newConfig.autoScan && !watcher) {
                     startWatcher();
-                } else if (!newConfig.autoScan && watcher) {
+                } else if (!newConfig.autoScan) {
                     stopWatcher();
                 } else if (watcher) {
                     updateWatcherDirs(newConfig);
@@ -1330,7 +1382,7 @@ function vtSentinelPlugin(api: PluginApi) {
             }
 
             const eff = configManager.getEffective();
-            const currentCreds = loadAgentCredentials();
+            const currentCreds = loadAgentCredentials(resolvedStateDir);
 
             // Resolve display name for preview
             let displayName = eff.agentDisplayName;
@@ -1364,40 +1416,53 @@ function vtSentinelPlugin(api: PluginApi) {
                 return textResponse(lines.join('\n'));
             }
 
-            // Confirmed — re-register
-            try {
-                // Backup current credentials (0o600 on POSIX; on Windows the
-                // file inherits ACLs from the user's profile dir — see
-                // saveAgentCredentials() for rationale on not shelling to icacls).
-                if (currentCreds) {
-                    const backupPath = getAgentCredentialsPath() + '.bak';
-                    fs.writeFileSync(backupPath, JSON.stringify(currentCreds, null, 2), { mode: 0o600 });
-                }
+            // Capture the previous identity only when this operation reaches
+            // the front of the queue, after any pending automatic registration.
+            const generation = serviceGeneration;
+            return withCredentialOperation(async () => {
+                const previousCreds = loadAgentCredentials(resolvedStateDir);
+                let saveAttempted = false;
+                try {
+                    if (previousCreds) {
+                        const backupPath = getAgentCredentialsPath(resolvedStateDir) + '.bak';
+                        fs.writeFileSync(backupPath, JSON.stringify(previousCreds, null, 2), { mode: 0o600 });
+                    }
 
-                const newCreds = await registerAgent(buildRegistrationOpts());
-                saveAgentCredentials(newCreds);
-
-                // Update scanner with new token
-                if (scanner) {
+                    const opts = buildRegistrationOpts();
+                    const newCreds = await registerAgent(opts);
                     const scanEff = configManager.getEffective();
-                    scanner = new Scanner(newCreds.agentToken, api.logger,
-                        scanEff.maxFileSizeMb, scanEff.sensitiveFilePolicy, true, scanEff.semanticFilePolicy);
-                }
+                    const replacement = scanner && !serviceStopped && generation === serviceGeneration
+                        ? new Scanner(newCreds.agentToken, api.logger, scanEff.maxFileSizeMb,
+                            scanEff.sensitiveFilePolicy, true, scanEff.semanticFilePolicy)
+                        : null;
+                    saveAttempted = true;
+                    saveAgentCredentials(newCreds, resolvedStateDir);
+                    scanner = replacement;
+                    credentialMode = 'vtai';
 
-                const lines = ['Agent re-registered successfully:'];
-                lines.push(`  New handle: ${newCreds.publicHandle}`);
-                lines.push(`  Display name: ${buildRegistrationOpts().displayName || displayName}`);
-                if (currentCreds) {
-                    lines.push(`  Previous handle: ${currentCreds.publicHandle} (backup saved)`);
+                    const lines = ['Agent re-registered successfully:'];
+                    lines.push(`  New handle: ${newCreds.publicHandle}`);
+                    lines.push(`  Display name: ${opts.displayName || displayName}`);
+                    if (previousCreds) lines.push(`  Previous handle: ${previousCreds.publicHandle} (backup saved)`);
+                    return textResponse(lines.join('\n'));
+                } catch (err: any) {
+                    if (saveAttempted) {
+                        try {
+                            if (previousCreds) {
+                                saveAgentCredentials(previousCreds, resolvedStateDir);
+                            } else {
+                                // A failed first save can leave a truncated file.
+                                fs.rmSync(getAgentCredentialsPath(resolvedStateDir), { force: true });
+                            }
+                        } catch {
+                            return textResponse(`Re-registration failed: ${err.message}\nCould not restore credential state; check the credential file and any backup.`);
+                        }
+                    }
+                    const outcome = !saveAttempted ? 'Credential file unchanged.'
+                        : previousCreds ? 'Previous credentials restored.' : 'No credentials saved.';
+                    return textResponse(`Re-registration failed: ${err.message}\n${outcome}`);
                 }
-                return textResponse(lines.join('\n'));
-            } catch (err: any) {
-                // Rollback on failure
-                if (currentCreds) {
-                    saveAgentCredentials(currentCreds);
-                }
-                return textResponse(`Re-registration failed: ${err.message}\nPrevious credentials restored.`);
-            }
+            });
         },
     });
 
@@ -1439,12 +1504,12 @@ function vtSentinelPlugin(api: PluginApi) {
         }
 
         // autoScan=false disables hook scanning; blockMode independently controls command enforcement.
-        const hookEff = configManager.getEffective();
-        if (!hookEff.autoScan) return;
+        const generation = automaticGeneration;
+        if (!automaticScanActive(generation)) return;
 
         // Initialize scanner only when we're actually going to scan
         const s = await ensureScanner();
-        if (!s) return;
+        if (!s || !automaticScanActive(generation)) return;
 
         const toolName: string = event.toolName || event.tool || '';
         const toolParams: Record<string, any> = event.toolParams || event.params || event.input || {};
@@ -1458,6 +1523,8 @@ function vtSentinelPlugin(api: PluginApi) {
         }
 
         for (const target of targets) {
+            if (!automaticScanActive(generation)) return;
+            const hookEff = configManager.getEffective();
             if (isSelfPath(target.path)) continue;
 
             // excludeGlobs: skip files matching any exclude pattern
@@ -1486,7 +1553,9 @@ function vtSentinelPlugin(api: PluginApi) {
                     }
                 }
 
+                if (!automaticScanActive(generation)) return;
                 const result = await s.scanFile(target.path, false, precomputedHash, isReadTarget);
+                if (!automaticScanActive(generation)) return;
                 auditResult(result);
                 // Apply the current enforcement policy, not the one at scan start.
                 const blockMode = configManager.getEffective().blockMode;
